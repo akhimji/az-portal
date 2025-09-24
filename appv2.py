@@ -2,7 +2,7 @@
 import argparse, csv, json
 from collections import defaultdict
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Tuple
 
 def _normalize_value(v: Any) -> str:
     if v is None:
@@ -47,26 +47,68 @@ def _extract_mg(rec: Dict[str, Any]) -> str | None:
             return mg.strip()
     return None
 
-def load_mg_alias_values(jsonl_path: Path) -> Dict[str, Dict[str, set]]:
-    mg_map = defaultdict(lambda: defaultdict(set))
+def load_mg_alias_values(jsonl_path: Path, verbose: bool = False) -> Tuple[Dict[str, Dict[str, set]], Dict[str, Any]]:
+    """
+    Load management-group -> alias -> set(values).
+    Returns (mg_map, stats). If verbose is True, samples of problematic lines are collected.
+    """
+    mg_map: Dict[str, Dict[str, set]] = defaultdict(lambda: defaultdict(set))
+
+    # Counters and samples
+    total = 0
+    parsed = 0
+    blank = 0
+    json_errors = 0
+    no_mg = 0
+    no_alias = 0
+    sample_limit = 5
+    sample_json_errors: List[str] = []
+    sample_no_mg: List[str] = []
+    sample_no_alias: List[str] = []
+
     with jsonl_path.open("r", encoding="utf-8") as f:
         for line in f:
+            total += 1
+            orig_line = line.rstrip("\n")
             line = line.strip()
             if not line:
+                blank += 1
                 continue
             try:
                 rec = json.loads(line)
             except json.JSONDecodeError:
+                json_errors += 1
+                if verbose and len(sample_json_errors) < sample_limit:
+                    sample_json_errors.append(orig_line)
                 continue
+            parsed += 1
             mg = _extract_mg(rec)
             if not mg:
+                no_mg += 1
+                if verbose and len(sample_no_mg) < sample_limit:
+                    sample_no_mg.append(orig_line)
                 continue
             alias = rec.get("policyAlias") or rec.get("alias")
             if not alias:
+                no_alias += 1
+                if verbose and len(sample_no_alias) < sample_limit:
+                    sample_no_alias.append(orig_line)
                 continue
             val = rec.get("resolvedEffectiveValue")
             mg_map[mg][alias].add(_normalize_value(val))
-    return mg_map
+
+    stats = {
+        "total_lines": total,
+        "parsed": parsed,
+        "blank": blank,
+        "json_errors": json_errors,
+        "no_mg": no_mg,
+        "no_alias": no_alias,
+        "sample_json_errors": sample_json_errors,
+        "sample_no_mg": sample_no_mg,
+        "sample_no_alias": sample_no_alias,
+    }
+    return mg_map, stats
 
 def compare_deltas(mg_map: Dict[str, Dict[str, set]], source_mg: str, dest_mg: str) -> List[Dict[str, str]]:
     rows = []
@@ -96,13 +138,36 @@ def main():
     ap.add_argument("--dest")
     ap.add_argument("--out", default="policy_deltas.csv")
     ap.add_argument("--inspect", action="store_true")
+    ap.add_argument("--verbose", "-v", action="store_true", help="Show counts and samples of skipped/invalid JSON lines")
     args = ap.parse_args()
 
     p = Path(args.file)
     if not p.exists():
         raise SystemExit(f"File not found: {p}")
 
-    mg_map = load_mg_alias_values(p)
+    mg_map, stats = load_mg_alias_values(p, args.verbose)
+
+    if args.verbose:
+        print("Load summary:")
+        print(f"  total lines: {stats['total_lines']}")
+        print(f"  parsed: {stats['parsed']}")
+        print(f"  blank lines: {stats['blank']}")
+        print(f"  json decode errors: {stats['json_errors']}")
+        print(f"  records missing management group: {stats['no_mg']}")
+        print(f"  records missing alias: {stats['no_alias']}")
+        if stats["sample_json_errors"]:
+            print("\nSample JSON decode failures:")
+            for s in stats["sample_json_errors"]:
+                print("  ", s)
+        if stats["sample_no_mg"]:
+            print("\nSample records missing MG:")
+            for s in stats["sample_no_mg"]:
+                print("  ", s)
+        if stats["sample_no_alias"]:
+            print("\nSample records missing alias:")
+            for s in stats["sample_no_alias"]:
+                print("  ", s)
+        print("")
 
     if args.inspect:
         print(f"Found {len(mg_map)} management groups:")
