@@ -5,6 +5,22 @@ from collections import defaultdict, Counter
 from pathlib import Path
 from typing import Any, Dict, Set, List, Tuple, Iterable
 
+# --- Begin empty-value pruning helpers ---
+DEFAULT_EMPTY_TOKENS = {"null", "[]", "{}", ""}
+
+def _parse_token_list(args_list):
+    tokens = set()
+    for item in (args_list or []):
+        for t in (x.strip() for x in item.split(",") if x.strip()):
+            tokens.add(t)
+    return tokens
+
+def _prune_set(values_set, empty_tokens):
+    """Remove entries that are considered empty from a set of normalized strings."""
+    return {v for v in values_set if v not in empty_tokens}
+# --- End empty-value pruning helpers ---
+
+
 def _normalize_value(v: Any) -> str:
     if v is None:
         return "null"
@@ -91,6 +107,9 @@ def compute_rows(
     include_missing: bool,
     alias_filter: Set[str] | None,
     extra_fields: List[str],
+    do_prune: bool,
+    empty_tokens: Set[str],
+    drop_empty_rows: bool,
 ) -> List[Dict[str, str]]:
     rows: List[Dict[str, str]] = []
 
@@ -114,8 +133,14 @@ def compute_rows(
         d_entry = mg_map[dest_mg][alias]
         s_vals = s_entry["values"]
         d_vals = d_entry["values"]
+        if do_prune:
+            s_vals = _prune_set(s_vals, empty_tokens)
+            d_vals = _prune_set(d_vals, empty_tokens)
         equal = (s_vals == d_vals)
         if not include_equals and equal:
+            continue
+        # Optionally drop rows where both sides have no values and no extras
+        if drop_empty_rows and not s_vals and not d_vals:
             continue
         row = {
             "policyAlias": alias,
@@ -134,13 +159,16 @@ def compute_rows(
 
     for alias in src_only:
         s_entry = mg_map[source_mg][alias]
+        # Optionally drop rows where both sides have no values and no extras
+        if drop_empty_rows and not s_vals and not d_vals:
+            continue
         row = {
             "policyAlias": alias,
             "source_mg": source_mg,
             "dest_mg": dest_mg,
-            "source_values": "; ".join(sorted(s_entry["values"])),
+            "source_values": "; ".join(sorted(s_vals)),
             "dest_values": "",
-            "only_in_source": "; ".join(sorted(s_entry["values"])),
+            "only_in_source": "; ".join(sorted(s_vals)),
             "only_in_dest": "",
         }
         for fld in extra_fields:
@@ -151,14 +179,17 @@ def compute_rows(
 
     for alias in dst_only:
         d_entry = mg_map[dest_mg][alias]
+        # Optionally drop rows where both sides have no values and no extras
+        if drop_empty_rows and not s_vals and not d_vals:
+            continue
         row = {
             "policyAlias": alias,
             "source_mg": source_mg,
             "dest_mg": dest_mg,
             "source_values": "",
-            "dest_values": "; ".join(sorted(d_entry["values"])),
+            "dest_values": "; ".join(sorted(d_vals)),
             "only_in_source": "",
-            "only_in_dest": "; ".join(sorted(d_entry["values"])),
+            "only_in_dest": "; ".join(sorted(d_vals)),
         }
         for fld in extra_fields:
             row[f"source_{fld}"] = ""
@@ -182,6 +213,9 @@ def main():
     ap.add_argument("--alias", action="append", default=[], help="Filter to specific alias(es). Repeat or comma-separate")
     ap.add_argument("--include-fields", default="", help="Comma-separated extra fields to include (paired as source_* and dest_*)")
     ap.add_argument("--wide", action="store_true", help="Include a practical wide set of helpful fields")
+    ap.add_argument("--prune-empty-values", action="store_true", help="Exclude empty values like null/[]/{} from comparison and output")
+    ap.add_argument("--empty-token", action="append", default=[], help="Additional tokens to treat as empty (repeat or comma-separate)")
+    ap.add_argument("--drop-empty-rows", action="store_true", help="After pruning, drop rows where both sides have no values and no extras")
 
     args = ap.parse_args()
     jsonl_path = Path(args.file)
@@ -214,6 +248,13 @@ def main():
         add_field(f)
 
     requested_fields = set(extra_fields)
+
+    # Empty-value pruning setup
+    empty_tokens = set(DEFAULT_EMPTY_TOKENS)
+    if args.empty_token:
+        empty_tokens |= _parse_token_list(args.empty_token)
+    do_prune = args.prune_empty_values
+
 
     alias_filter: Set[str] | None = None
     if args.alias:
@@ -254,6 +295,9 @@ def main():
         include_missing=args.include_missing,
         alias_filter=alias_filter,
         extra_fields=extra_fields,
+        do_prune=do_prune,
+        empty_tokens=empty_tokens,
+        drop_empty_rows=args.drop_empty_rows,
     )
 
     base_fields = [
