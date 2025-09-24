@@ -1,11 +1,11 @@
 
 #!/usr/bin/env python3
-import argparse, csv, json, re
+import argparse, csv, json
 from collections import defaultdict, Counter
 from pathlib import Path
-from typing import Any, Dict, Set, List, Tuple, Iterable
+from typing import Any, Dict, Set, List
 
-# --- Begin empty-value pruning helpers ---
+# ---- Empty value pruning helpers ----
 DEFAULT_EMPTY_TOKENS = {"null", "[]", "{}", ""}
 
 def _parse_token_list(args_list):
@@ -16,11 +16,9 @@ def _parse_token_list(args_list):
     return tokens
 
 def _prune_set(values_set, empty_tokens):
-    """Remove entries that are considered empty from a set of normalized strings."""
     return {v for v in values_set if v not in empty_tokens}
-# --- End empty-value pruning helpers ---
 
-
+# ---- Normalization ----
 def _normalize_value(v: Any) -> str:
     if v is None:
         return "null"
@@ -42,6 +40,7 @@ def _normalize_value(v: Any) -> str:
     except Exception:
         return str(v)
 
+# ---- MG extraction ----
 def _extract_mg(rec: Dict[str, Any]) -> str | None:
     for key in ("assignmentScope", "scope", "policyScope"):
         scope = rec.get(key)
@@ -62,6 +61,7 @@ def _extract_mg(rec: Dict[str, Any]) -> str | None:
             return mg.strip()
     return None
 
+# ---- Load data ----
 def load_data(jsonl_path: Path, requested_fields: Set[str]) -> Dict[str, Dict[str, Dict[str, Any]]]:
     mg_map: Dict[str, Dict[str, Dict[str, Any]]] = defaultdict(dict)
     with jsonl_path.open("r", encoding="utf-8") as f:
@@ -99,6 +99,7 @@ def load_data(jsonl_path: Path, requested_fields: Set[str]) -> Dict[str, Dict[st
                             entry["fields"][fld].add(_normalize_value(rec[k]))
     return mg_map
 
+# ---- Compute rows ----
 def compute_rows(
     mg_map: Dict[str, Dict[str, Dict[str, Any]]],
     source_mg: str,
@@ -128,6 +129,7 @@ def compute_rows(
         vals = entry["fields"].get(fld, set())
         return "; ".join(sorted(vals))
 
+    # Common
     for alias in common_aliases:
         s_entry = mg_map[source_mg][alias]
         d_entry = mg_map[dest_mg][alias]
@@ -136,11 +138,10 @@ def compute_rows(
         if do_prune:
             s_vals = _prune_set(s_vals, empty_tokens)
             d_vals = _prune_set(d_vals, empty_tokens)
+        if drop_empty_rows and not s_vals and not d_vals:
+            continue
         equal = (s_vals == d_vals)
         if not include_equals and equal:
-            continue
-        # Optionally drop rows where both sides have no values and no extras
-        if drop_empty_rows and not s_vals and not d_vals:
             continue
         row = {
             "policyAlias": alias,
@@ -157,10 +158,13 @@ def compute_rows(
         row["delta"] = "true" if not equal else "false"
         rows.append(row)
 
+    # Source-only
     for alias in src_only:
         s_entry = mg_map[source_mg][alias]
-        # Optionally drop rows where both sides have no values and no extras
-        if drop_empty_rows and not s_vals and not d_vals:
+        s_vals = s_entry["values"]
+        if do_prune:
+            s_vals = _prune_set(s_vals, empty_tokens)
+        if drop_empty_rows and not s_vals:
             continue
         row = {
             "policyAlias": alias,
@@ -177,10 +181,13 @@ def compute_rows(
         row["delta"] = "true"
         rows.append(row)
 
+    # Destination-only
     for alias in dst_only:
         d_entry = mg_map[dest_mg][alias]
-        # Optionally drop rows where both sides have no values and no extras
-        if drop_empty_rows and not s_vals and not d_vals:
+        d_vals = d_entry["values"]
+        if do_prune:
+            d_vals = _prune_set(d_vals, empty_tokens)
+        if drop_empty_rows and not d_vals:
             continue
         row = {
             "policyAlias": alias,
@@ -199,6 +206,7 @@ def compute_rows(
 
     return rows
 
+# ---- Main ----
 def main():
     ap = argparse.ArgumentParser(description="Compare policy resolvedEffectiveValue deltas between two management groups (CSV/JSON)")
     ap.add_argument("--file", required=True, help="Path to JSONL source file")
@@ -213,7 +221,8 @@ def main():
     ap.add_argument("--alias", action="append", default=[], help="Filter to specific alias(es). Repeat or comma-separate")
     ap.add_argument("--include-fields", default="", help="Comma-separated extra fields to include (paired as source_* and dest_*)")
     ap.add_argument("--wide", action="store_true", help="Include a practical wide set of helpful fields")
-    ap.add_argument("--prune-empty-values", action="store_true", help="Exclude empty values like null/[]/{} from comparison and output")
+
+    ap.add_argument("--prune-empty-values", action="store_true", help="Exclude empty tokens (null/[]/{}/\"\") from comparison and output")
     ap.add_argument("--empty-token", action="append", default=[], help="Additional tokens to treat as empty (repeat or comma-separate)")
     ap.add_argument("--drop-empty-rows", action="store_true", help="After pruning, drop rows where both sides have no values and no extras")
 
@@ -249,13 +258,6 @@ def main():
 
     requested_fields = set(extra_fields)
 
-    # Empty-value pruning setup
-    empty_tokens = set(DEFAULT_EMPTY_TOKENS)
-    if args.empty_token:
-        empty_tokens |= _parse_token_list(args.empty_token)
-    do_prune = args.prune_empty_values
-
-
     alias_filter: Set[str] | None = None
     if args.alias:
         tmp: Set[str] = set()
@@ -279,6 +281,14 @@ def main():
 
     if not args.source or not args.dest:
         raise SystemExit("Please specify --source and --dest (or use --inspect).")
+
+    requested_fields = set(extra_fields)
+
+    # Empty pruning
+    empty_tokens = set(DEFAULT_EMPTY_TOKENS)
+    if args.empty_token:
+        empty_tokens |= _parse_token_list(args.empty_token)
+    do_prune = args.prune_empty_values
 
     mg_map = load_data(jsonl_path, requested_fields=requested_fields)
 
