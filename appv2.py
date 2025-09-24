@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
 import argparse, csv, json
+import logging
 from collections import defaultdict
 from pathlib import Path
 from typing import Any, Dict, List, Tuple, Optional
+
+logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 
 def _normalize_value(v: Any) -> str:
     if v is None:
@@ -291,6 +294,7 @@ def main():
             for s in stats["sample_no_alias"]:
                 print("  ", s)
         print("")
+    logging.debug("parsed=%d json_errors=%d", stats["parsed"], stats["json_errors"])
 
     if args.inspect:
         print(f"Found {len(mg_map)} management groups:")
